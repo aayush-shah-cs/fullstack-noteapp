@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
+const API = "https://fullstack-noteapp-1-jis2.onrender.com"
 // ─── DATA ─────────────────────────────────────────────────────────────────────
 const COLORS = [
   { id:'yellow', bg:'#fef9c3', border:'#fde047', text:'#713f12' },
@@ -45,19 +46,20 @@ function Modal({ title, onClose, children }){
 // ─── NOTE EDITOR MODAL ────────────────────────────────────────────────────────
 function NoteModal({ note, folders, onSave, onClose }) {
   const isNew = !note
-  const [title, setTitle]     = useState(note?.title || '')
-  const [body, setBody]       = useState(note?.body || '')
-  const [color, setColor]     = useState(note?.color || 'yellow')
-  const [folderId, setFolder] = useState(note?.folderId || '')
+  const [title, setTitle]         = useState(note?.title || '')
+  const [body, setBody]           = useState(note?.body || '')
+  const [color, setColor]         = useState(note?.color || 'yellow')
+  const [folderId, setFolder]     = useState(note?.folderId || '')
   const [isRecording, setIsRecording] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
   const recognitionRef = useRef(null)
   const c = colorObj(color)
 
-  // ── Voice recording logic
+  // ── Voice recording logic ──────────────────────────────────────────────────
   const startRecording = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
-      alert('Voice input is only supported in Chrome. Please use Chrome browser.')
+      alert('Voice input is only supported in Chrome.')
       return
     }
 
@@ -70,30 +72,24 @@ function NoteModal({ note, folders, onSave, onClose }) {
 
     recognition.onresult = (event) => {
       let finalTranscript = ''
-      let interimTranscript = ''
-
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript
         if (event.results[i].isFinal) {
-          finalTranscript += transcript
-        } else {
-          interimTranscript += transcript
+          finalTranscript += event.results[i][0].transcript
         }
       }
 
-      // Check for stop commands in final transcript
       const stopCommands = ["that's all", "stop recording", "thats all"]
-      const lowerFinal = finalTranscript.toLowerCase().trim()
-      const isStopCommand = stopCommands.some(cmd => lowerFinal.includes(cmd))
+      const lower = finalTranscript.toLowerCase().trim()
+      const isStop = stopCommands.some(cmd => lower.includes(cmd))
 
-      if (isStopCommand) {
-        // Remove the stop command phrase from the text
+      if (isStop) {
         let cleaned = finalTranscript
         stopCommands.forEach(cmd => {
           cleaned = cleaned.replace(new RegExp(cmd, 'gi'), '')
         })
-        setBody(prev => (prev + cleaned).trim())
+        const finalText = cleaned.trim()
         stopRecording()
+        if (finalText) processWithGemini(finalText)
         return
       }
 
@@ -102,17 +98,8 @@ function NoteModal({ note, folders, onSave, onClose }) {
       }
     }
 
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error)
-      setIsRecording(false)
-    }
-
-    recognition.onend = () => {
-      // Auto-restart if still meant to be recording (handles Chrome's timeout)
-      if (recognitionRef.current) {
-        recognition.start()
-      }
-    }
+    recognition.onerror = (e) => { console.error(e.error); setIsRecording(false) }
+    recognition.onend   = () => { if (recognitionRef.current) recognition.start() }
 
     recognitionRef.current = recognition
     recognition.start()
@@ -120,22 +107,36 @@ function NoteModal({ note, folders, onSave, onClose }) {
 
   const stopRecording = () => {
     if (recognitionRef.current) {
-      recognitionRef.current.onend = null // prevent auto-restart
+      recognitionRef.current.onend = null
       recognitionRef.current.stop()
       recognitionRef.current = null
     }
     setIsRecording(false)
   }
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      stopRecording()
-    } else {
-      startRecording()
+  const handleStopClick = () => {
+    // collect whatever is in body so far, then send to Gemini
+    const currentText = body.trim()
+    stopRecording()
+    if (currentText) processWithGemini(currentText)
+  }
+
+  // ── Gemini processing ──────────────────────────────────────────────────────
+  const processWithGemini = async (transcript) => {
+    setIsProcessing(true)
+    try {
+      const res = await axios.post(`${API}/ai-note`, { transcript })
+      if (res.data.title) setTitle(res.data.title)
+      if (res.data.body)  setBody(res.data.body)
+    } catch (err) {
+      console.error('AI processing failed:', err)
+      // fallback: keep raw transcript in body as-is
+    } finally {
+      setIsProcessing(false)
     }
   }
 
-  // Cleanup on unmount
+  // Cleanup mic on unmount
   useEffect(() => {
     return () => {
       if (recognitionRef.current) {
@@ -146,82 +147,142 @@ function NoteModal({ note, folders, onSave, onClose }) {
     }
   }, [])
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
-      <div style={{ background: c.bg, borderRadius: 20, width: '100%', maxWidth: 560, boxShadow: '0 20px 60px rgba(0,0,0,0.15)', overflow: 'hidden', border: `1.5px solid ${c.border}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: `1px solid ${c.border}` }}>
-          <span style={{ fontWeight: 700, fontSize: 15, color: c.text }}>{isNew ? 'New note' : 'Edit note'}</span>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.35)', zIndex:9999,
+                  display:'flex', alignItems:'center', justifyContent:'center', padding:'20px' }}>
+      <div style={{ background:c.bg, borderRadius:20, width:'100%', maxWidth:560,
+                    boxShadow:'0 20px 60px rgba(0,0,0,0.15)', overflow:'hidden',
+                    border:`1.5px solid ${c.border}` }}>
+
+        {/* ── Header ── */}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+                      padding:'18px 20px 14px', borderBottom:`1px solid ${c.border}` }}>
+          <span style={{ fontWeight:700, fontSize:15, color:c.text }}>
+            {isNew ? 'New note' : 'Edit note'}
+          </span>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
             {COLORS.map(cl => (
               <button key={cl.id} onClick={() => setColor(cl.id)}
-                style={{ width: 18, height: 18, borderRadius: '50%', background: cl.bg, border: color === cl.id ? `2.5px solid ${cl.text}` : `1.5px solid ${cl.border}`, cursor: 'pointer' }} />
+                style={{ width:18, height:18, borderRadius:'50%', background:cl.bg,
+                         border:color===cl.id ? `2.5px solid ${cl.text}` : `1.5px solid ${cl.border}`,
+                         cursor:'pointer' }} />
             ))}
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: c.text, marginLeft: 8, lineHeight: 1 }}>✕</button>
+            <button onClick={onClose}
+              style={{ background:'none', border:'none', cursor:'pointer',
+                       fontSize:18, color:c.text, marginLeft:8, lineHeight:1 }}>✕</button>
           </div>
         </div>
 
-        <div style={{ padding: '16px 20px' }}>
-          <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Title"
-            style={{ width: '100%', background: 'transparent', border: 'none', outline: 'none', fontWeight: 700, fontSize: 17, color: c.text, marginBottom: 12, fontFamily: 'inherit' }} />
-          <textarea value={body} onChange={e => setBody(e.target.value)} placeholder="Write your note here…" rows={7}
-            style={{ width: '100%', background: 'transparent', border: 'none', outline: 'none', fontSize: 14, color: c.text, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.7 }} />
+        {/* ── Body ── */}
+        <div style={{ padding:'16px 20px' }}>
 
-          {/* Voice recording button */}
-          <div style={{ marginTop: 10, marginBottom: 4 }}>
-            <button onClick={toggleRecording}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '7px 14px', borderRadius: 10, border: `1.5px solid ${c.border}`,
-                background: isRecording ? '#fee2e2' : 'rgba(255,255,255,0.5)',
-                color: isRecording ? '#dc2626' : c.text,
-                fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-                transition: 'all 0.2s'
-              }}>
-              <span style={{ fontSize: 15 }}>{isRecording ? '⏹' : '🎤'}</span>
-              {isRecording ? 'Stop Recording' : 'Record Note'}
+          {/* AI processing banner */}
+          {isProcessing && (
+            <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 14px',
+                          background:'rgba(79,70,229,0.08)', borderRadius:10,
+                          border:'1px solid rgba(79,70,229,0.2)', marginBottom:14 }}>
+              <span style={{ fontSize:16 }}>✨</span>
+              <span style={{ fontSize:13, color:'#4f46e5', fontWeight:500 }}>
+                Gemini is organising your note…
+              </span>
+              <span style={{ marginLeft:'auto', fontSize:18,
+                             animation:'spin 1s linear infinite', display:'inline-block' }}>⟳</span>
+            </div>
+          )}
+
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Title"
+            style={{ width:'100%', background:'transparent', border:'none', outline:'none',
+                     fontWeight:700, fontSize:17, color:c.text, marginBottom:12, fontFamily:'inherit' }} />
+
+          <textarea
+            value={body}
+            onChange={e => setBody(e.target.value)}
+            placeholder="Write your note here… or use 🎤 to speak"
+            rows={7}
+            style={{ width:'100%', background:'transparent', border:'none', outline:'none',
+                     fontSize:14, color:c.text, resize:'vertical', fontFamily:'inherit', lineHeight:1.7 }} />
+
+          {/* ── Voice + AI button row ── */}
+          <div style={{ marginTop:10, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+
+            {/* Mic button */}
+            <button
+              onClick={isRecording ? handleStopClick : startRecording}
+              disabled={isProcessing}
+              style={{ display:'flex', alignItems:'center', gap:6, padding:'7px 14px',
+                       borderRadius:10, border:`1.5px solid ${c.border}`,
+                       background: isRecording ? '#fee2e2' : 'rgba(255,255,255,0.5)',
+                       color: isRecording ? '#dc2626' : c.text,
+                       fontSize:13, fontWeight:600, cursor: isProcessing ? 'not-allowed' : 'pointer',
+                       opacity: isProcessing ? 0.5 : 1, fontFamily:'inherit', transition:'all 0.2s' }}>
+              <span style={{ fontSize:15 }}>{isRecording ? '⏹' : '🎤'}</span>
+              {isRecording ? 'Stop & Process' : 'Record Note'}
               {isRecording && (
-                <span style={{
-                  width: 8, height: 8, borderRadius: '50%', background: '#dc2626',
-                  display: 'inline-block', marginLeft: 2,
-                  animation: 'pulse 1s infinite'
-                }} />
+                <span style={{ width:8, height:8, borderRadius:'50%', background:'#dc2626',
+                               display:'inline-block', marginLeft:2,
+                               animation:'pulse 1s infinite' }} />
               )}
             </button>
-            {isRecording && (
-              <p style={{ fontSize: 11, color: c.text, opacity: 0.55, marginTop: 5, marginBottom: 0 }}>
-                🎙 Listening… say <strong>"that's all"</strong> or <strong>"stop recording"</strong> to finish.
-              </p>
+
+            {/* Manual "Enhance with AI" button — for typed/existing text */}
+            {!isRecording && body.trim() && (
+              <button
+                onClick={() => processWithGemini(body)}
+                disabled={isProcessing}
+                style={{ display:'flex', alignItems:'center', gap:6, padding:'7px 14px',
+                         borderRadius:10, border:'1.5px solid rgba(79,70,229,0.35)',
+                         background:'rgba(79,70,229,0.07)', color:'#4f46e5',
+                         fontSize:13, fontWeight:600, cursor: isProcessing ? 'not-allowed' : 'pointer',
+                         opacity: isProcessing ? 0.5 : 1, fontFamily:'inherit', transition:'all 0.2s' }}>
+                <span style={{ fontSize:14 }}>✨</span> Enhance with AI
+              </button>
             )}
           </div>
 
-          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: c.text, opacity: 0.6 }}>Folder:</span>
+          {isRecording && (
+            <p style={{ fontSize:11, color:c.text, opacity:0.55, marginTop:6, marginBottom:0 }}>
+              🎙 Listening… say <strong>"that's all"</strong> or click <strong>Stop & Process</strong> to finish.
+            </p>
+          )}
+
+          {/* Folder selector */}
+          <div style={{ marginTop:12, display:'flex', alignItems:'center', gap:8 }}>
+            <span style={{ fontSize:12, color:c.text, opacity:0.6 }}>Folder:</span>
             <select value={folderId} onChange={e => setFolder(e.target.value)}
-              style={{ fontSize: 13, border: `1px solid ${c.border}`, borderRadius: 8, padding: '4px 8px', background: c.bg, color: c.text, outline: 'none' }}>
+              style={{ fontSize:13, border:`1px solid ${c.border}`, borderRadius:8,
+                       padding:'4px 8px', background:c.bg, color:c.text, outline:'none' }}>
               <option value=''>None</option>
               {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
             </select>
           </div>
         </div>
 
-        <div style={{ padding: '0 20px 20px', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        {/* ── Footer ── */}
+        <div style={{ padding:'0 20px 20px', display:'flex', justifyContent:'flex-end', gap:8 }}>
           <button onClick={onClose}
-            style={{ padding: '8px 18px', borderRadius: 10, border: `1px solid ${c.border}`, background: 'transparent', color: c.text, fontSize: 13, cursor: 'pointer', fontWeight: 500 }}>
-            Cancel
-          </button>
-          <button onClick={() => { if (title.trim() || body.trim()) onSave({ title: title.trim() || 'Untitled', body, color, folderId: folderId || null }); onClose() }}
-            style={{ padding: '8px 20px', borderRadius: 10, border: 'none', background: c.text, color: '#fff', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
-            Save
-          </button>
+            style={{ padding:'8px 18px', borderRadius:10, border:`1px solid ${c.border}`,
+                     background:'transparent', color:c.text, fontSize:13,
+                     cursor:'pointer', fontWeight:500 }}>Cancel</button>
+          <button
+            onClick={() => {
+              if (title.trim() || body.trim())
+                onSave({ title: title.trim() || 'Untitled', body, color, folderId: folderId || null })
+              onClose()
+            }}
+            disabled={isProcessing}
+            style={{ padding:'8px 20px', borderRadius:10, border:'none', background:c.text,
+                     color:'#fff', fontSize:13, cursor: isProcessing ? 'not-allowed' : 'pointer',
+                     fontWeight:600, opacity: isProcessing ? 0.6 : 1 }}>Save</button>
         </div>
       </div>
 
-      {/* Pulse animation for recording indicator */}
       <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.4; transform: scale(1.3); }
-        }
+        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.3)} }
+        @keyframes spin   { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
       `}</style>
     </div>
   )
@@ -455,7 +516,7 @@ const fetchNotes = async () => {
 
     try {
 
-        const res = await axios.get('http://localhost:3000/notes');
+        const res = await axios.get(`${API}/notes`);
 
         const formattedNotes = res.data.map(note => ({
 
@@ -486,9 +547,9 @@ const saveNote = async (data, existing) => {
         if(existing){
 
             const res = await axios.put(
-                `http://localhost:3000/notes/${existing.id}`,
-                data
-            );
+              `${API}/notes/${existing.id}`,
+            data
+          );
 
             const updatedNote = {
                 ...res.data,
@@ -512,10 +573,10 @@ const saveNote = async (data, existing) => {
                 created:new Date()
             };
 
-            const res = await axios.post(
-                'http://localhost:3000/notes',
-                newNote
-            );
+              const res = await axios.post(
+                  `${API}/notes`,
+                  newNote
+              );
 
             const savedNote = {
                 ...res.data,
