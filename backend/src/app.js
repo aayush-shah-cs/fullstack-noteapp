@@ -8,6 +8,7 @@ const Note = require('./model/model');
 
 app.use(cors());
 app.use(express.json());
+
 app.post('/notes', async (req,res)=>{
     const note = await Note.create(req.body);
     res.json(note);
